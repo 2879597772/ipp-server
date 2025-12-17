@@ -1,14 +1,16 @@
-from __future__ import division
-from __future__ import absolute_import
-from __future__ import print_function
-from __future__ import unicode_literals
-
 from io import BytesIO
 import operator
 import itertools
 
 from .parsers import read_struct, write_struct
-from .constants import SectionEnum, TagEnum
+from .constants import SectionEnum, TagEnum, IppVersionEnum
+
+# 导入翻译模块 - Import translation module
+try:
+    from .translations import t
+except ImportError:
+    def t(key, **kwargs):
+        return key
 
 
 class IppRequest(object):
@@ -18,11 +20,13 @@ class IppRequest(object):
         self.request_id = request_id
         self._attributes = attributes
 
-    def __cmp__(self, other):
-        return self.__eq__(other)
-
     def __eq__(self, other):
-        return type(self) == type(other) or self._attributes == other._attributes
+        if not isinstance(other, IppRequest):
+            return False
+        return (self.version == other.version and
+                self.opid_or_status == other.opid_or_status and
+                self.request_id == other.request_id and
+                self._attributes == other._attributes)
 
     def __repr__(self):
         return 'IppRequest(%r, 0x%04x, 0x%02x, %r)' % (
@@ -37,7 +41,17 @@ class IppRequest(object):
 
     @classmethod
     def from_file(cls, f):
-        version = read_struct(f, b'>bb')  # (major, minor)
+        version_major, version_minor = read_struct(f, b'>bb')
+        version = (version_major, version_minor)
+        
+        # Check if version is supported - 检查版本是否支持
+        version_code = (version_major << 8) | version_minor
+        if version_code not in [v.value for v in IppVersionEnum]:
+            # RFC 8011: If version is not supported, respond with server-error-version-not-supported
+            # RFC 8011：如果版本不支持，使用server-error-version-not-supported响应
+            # But we still parse the request to get the request_id - 但我们仍然解析请求以获取request_id
+            pass
+        
         operation_id_or_status_code, request_id = read_struct(f, b'>hi')
 
         attributes = {}
@@ -53,14 +67,14 @@ class IppRequest(object):
                 current_name = None
             else:
                 if current_section is None:
-                    raise Exception('No section delimiter')
+                    raise Exception(t('request_no_section_delimiter'))
 
                 name_len, = read_struct(f, b'>h')
                 if name_len == 0:
                     if current_name is None:
-                        raise Exception('Additional attribute needs a name to follow')
+                        raise Exception(t('request_additional_attribute_needs_name'))
                     else:
-                        # additional attribute, under the same name
+                        # additional attribute, under the same name - 附加属性，使用相同的名称
                         pass
                 else:
                     current_name = f.read(name_len)
@@ -77,7 +91,7 @@ class IppRequest(object):
         return sio.getvalue()
 
     def to_file(self, f):
-        version_major, version_minor = 1, 1
+        version_major, version_minor = self.version
         write_struct(f, b'>bb', version_major, version_minor)
         write_struct(f, b'>hi', self.opid_or_status, self.request_id)
 
@@ -94,8 +108,9 @@ class IppRequest(object):
                         f.write(name)
                     else:
                         write_struct(f, b'>h', 0)
-                    # Integer must be 4 bytes
-                    assert (tag != TagEnum.integer or len(value) == 4)
+                    # Integer must be 4 bytes - 整数必须为4字节
+                    if tag == TagEnum.integer and len(value) != 4:
+                        raise ValueError(t('parser_integer_value_error', length=len(value)))
                     write_struct(f, b'>h', len(value))
                     f.write(value)
         write_struct(f, b'>B', SectionEnum.END)
@@ -111,13 +126,19 @@ class IppRequest(object):
         return ret
 
     def lookup(self, section, name, tag):
-        return self._attributes[section, name, tag]
+        return self._attributes.get((section, name, tag), [])
 
     def only(self, section, name, tag):
         items = self.lookup(section, name, tag)
         if len(items) == 1:
             return items[0]
         elif len(items) == 0:
-            raise RuntimeError('self._attributes[%r, %r, %r] is empty list' % (section, name, tag,))
+            raise RuntimeError(t('request_attributes_key_error', 
+                               section=repr(section), name=repr(name), tag=repr(tag)))
         else:
-            raise ValueError('self._attributes[%r, %r, %r] has more than one value' % (section, name, tag,))
+            raise ValueError(t('request_attributes_multiple_values',
+                             section=repr(section), name=repr(name), tag=repr(tag)))
+    
+    def get_version_code(self):
+        """Get IPP version as integer code - 获取IPP版本作为整数代码"""
+        return (self.version[0] << 8) | self.version[1]
